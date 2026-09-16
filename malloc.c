@@ -1,6 +1,7 @@
 #include "malloc.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 
 #define HEAP_SIZE  (1024 * 64)   /* 64 KB static heap */
 #define ALIGN       8
@@ -62,24 +63,68 @@ void *my_malloc(size_t size)
     return NULL;   /* out of memory */
 }
 
+/* ---------- coalesce ---------- */
+/* Single forward pass merging every run of adjacent free blocks.
+ * Because blocks are kept in address order (split inserts in place,
+ * free never reorders), physical adjacency == list adjacency, so one
+ * pass is sufficient to fully defragment the free space. */
+static void coalesce(void)
+{
+    block_t *cur = free_list;
+    while (cur && cur->next) {
+        if (cur->free && cur->next->free) {
+            cur->size += HEADER_SIZE + cur->next->size;
+            cur->next  = cur->next->next;   /* absorb next, re-check same cur */
+        } else {
+            cur = cur->next;
+        }
+    }
+}
+
 /* ---------- my_free ---------- */
 void my_free(void *ptr)
 {
     if (!ptr) return;
 
+    /* recover the header that sits immediately before the payload */
     block_t *blk = (block_t *)((char *)ptr - HEADER_SIZE);
     blk->free = 1;
 
-    /* coalesce adjacent free blocks */
-    block_t *cur = free_list;
-    while (cur && cur->next) {
-        if (cur->free && cur->next->free) {
-            cur->size += HEADER_SIZE + cur->next->size;
-            cur->next  = cur->next->next;
-        } else {
-            cur = cur->next;
-        }
-    }
+    coalesce();
+}
+
+/* ---------- my_calloc ---------- */
+void *my_calloc(size_t nmemb, size_t size)
+{
+    if (nmemb == 0 || size == 0) return NULL;
+
+    /* overflow-safe multiply */
+    if (nmemb > SIZE_MAX / size) return NULL;
+
+    size_t total = nmemb * size;
+    void *p = my_malloc(total);
+    if (p) memset(p, 0, total);
+    return p;
+}
+
+/* ---------- my_realloc ---------- */
+void *my_realloc(void *ptr, size_t size)
+{
+    if (ptr == NULL)  return my_malloc(size);   /* realloc(NULL, n) == malloc(n) */
+    if (size == 0)  { my_free(ptr); return NULL; }
+
+    block_t *blk = (block_t *)((char *)ptr - HEADER_SIZE);
+
+    /* shrinking or same size: keep the block as-is */
+    if (blk->size >= align_up(size))
+        return ptr;
+
+    /* growing: allocate new, copy old payload, free old */
+    void *np = my_malloc(size);
+    if (!np) return NULL;               /* original block left intact */
+    memcpy(np, ptr, blk->size);
+    my_free(ptr);
+    return np;
 }
 
 /* ---------- heap_dump ---------- */
